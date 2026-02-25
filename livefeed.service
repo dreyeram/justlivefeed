@@ -1,18 +1,25 @@
 [Unit]
 Description=Zero-Latency Endoscopy Live Feed
-Documentation=https://github.com/prantikm07/justlivefeed
-After=multi-user.target
+Documentation=https://github.com/dreyeram/justlivefeed
+After=multi-user.target systemd-logind.service
 Wants=multi-user.target
+
+# Wait for DRM/graphics to be ready
+After=dev-dri-card0.device
+After=dev-dri-card1.device
 
 [Service]
 Type=simple
-ExecStartPre=/bin/sleep 3
+
+# Give hardware time to initialize (USB capture card + DRM)
+ExecStartPre=/bin/sleep 5
+
 ExecStart=/opt/livefeed/livefeed.sh
 Restart=always
-RestartSec=2
+RestartSec=3
 TimeoutStopSec=5
 
-# Run as root for direct hardware access (KMS/DRM)
+# Run as root for DRM/KMS access
 User=root
 Group=root
 
@@ -21,15 +28,19 @@ Environment=VIDEO_DEVICE=/dev/video0
 Environment=WIDTH=1920
 Environment=HEIGHT=1080
 Environment=FRAMERATE=60
-Environment=SINK=auto
+Environment=HOME=/root
 Environment=XDG_RUNTIME_DIR=/run/user/0
+Environment=TERM=linux
+
+# Give access to all TTYs and DRM
+SupplementaryGroups=video render input tty
 
 # Realtime scheduling
 Nice=-20
 IOSchedulingClass=realtime
 IOSchedulingPriority=0
 
-# Logging
+# Logging — check with: sudo journalctl -u livefeed -f
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=livefeed
