@@ -35,8 +35,75 @@ echo -e "${CYAN}  Zero-Latency Endoscopy Live Feed - Installer${NC}"
 echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
 echo ""
 
+# ─── Step 0: Stop ALL previous applications ─────────────────────────────────
+info "Step 0/7: Stopping all previous applications..."
+
+# Stop and disable any old endoscopy-suite systemd services
+for svc in endoscopy endoscopy-suite camera-server camera_server endo-camera endo-feed nextjs next; do
+    if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
+        warn "Stopping old service: ${svc}"
+        systemctl stop "${svc}.service" 2>/dev/null || true
+    fi
+    if systemctl is-enabled --quiet "${svc}.service" 2>/dev/null; then
+        warn "Disabling old service: ${svc}"
+        systemctl disable "${svc}.service" 2>/dev/null || true
+    fi
+done
+
+# Stop PM2 if it's running (common for Node.js apps on Pi)
+if command -v pm2 &>/dev/null; then
+    warn "Stopping PM2 processes..."
+    pm2 kill 2>/dev/null || true
+    # Remove PM2 startup hook so it doesn't restart on boot
+    pm2 unstartup systemd 2>/dev/null || true
+    # Also try for the 'lm' user
+    su - lm -c "pm2 kill" 2>/dev/null || true
+    su - lm -c "pm2 unstartup systemd" 2>/dev/null || true
+fi
+
+# Kill any running Node.js / Next.js processes
+warn "Killing any Node.js / camera server processes..."
+pkill -f "node" 2>/dev/null || true
+pkill -f "next" 2>/dev/null || true
+pkill -f "npm" 2>/dev/null || true
+
+# Kill any Python camera servers
+pkill -f "camera_server" 2>/dev/null || true
+pkill -f "camera-server" 2>/dev/null || true
+pkill -f "python.*camera" 2>/dev/null || true
+pkill -f "uvicorn" 2>/dev/null || true
+pkill -f "flask" 2>/dev/null || true
+
+# Kill any old GStreamer pipelines
+pkill -f "gst-launch" 2>/dev/null || true
+
+# Disable old cron jobs or rc.local entries that might start old apps
+if [ -f /etc/rc.local ]; then
+    if grep -q "endoscopy\|camera\|next\|node\|pm2" /etc/rc.local 2>/dev/null; then
+        warn "Commenting out old entries in /etc/rc.local..."
+        sed -i '/endoscopy\|camera_server\|camera-server\|next\|pm2/s/^/#DISABLED_BY_LIVEFEED# /' /etc/rc.local
+    fi
+fi
+
+# Remove any old crontab entries for the lm user
+crontab -u lm -l 2>/dev/null | grep -v "endoscopy\|camera\|next\|node\|pm2" | crontab -u lm - 2>/dev/null || true
+
+# Disable old autostart desktop entries
+for f in /home/lm/.config/autostart/*.desktop /etc/xdg/autostart/*endoscop*.desktop; do
+    if [ -f "$f" ]; then
+        warn "Disabling autostart: $f"
+        mv "$f" "${f}.disabled" 2>/dev/null || true
+    fi
+done
+
+# Remove PM2 startup service if it exists
+rm -f /etc/systemd/system/pm2-*.service 2>/dev/null || true
+systemctl daemon-reload 2>/dev/null || true
+
+log "All previous applications stopped and disabled."
+
 # ─── Step 1: Install dependencies ───────────────────────────────────────────
-info "Step 1/6: Installing GStreamer and dependencies..."
+info "Step 1/7: Installing GStreamer and dependencies..."
 apt-get update -qq
 apt-get install -y -qq \
     gstreamer1.0-tools \
@@ -54,25 +121,25 @@ apt-get install -y -qq \
 log "Dependencies installed."
 
 # ─── Step 2: Create install directory ────────────────────────────────────────
-info "Step 2/6: Setting up ${INSTALL_DIR}..."
+info "Step 2/7: Setting up ${INSTALL_DIR}..."
 mkdir -p "$INSTALL_DIR"
 cp "${SCRIPT_DIR}/livefeed.sh" "${INSTALL_DIR}/livefeed.sh"
 chmod +x "${INSTALL_DIR}/livefeed.sh"
 log "Script installed to ${INSTALL_DIR}/livefeed.sh"
 
 # ─── Step 3: Install systemd service ────────────────────────────────────────
-info "Step 3/6: Installing systemd service..."
+info "Step 3/7: Installing systemd service..."
 cp "${SCRIPT_DIR}/livefeed.service" "/etc/systemd/system/${SERVICE_NAME}.service"
 systemctl daemon-reload
 log "Service installed."
 
 # ─── Step 4: Enable service for auto-start ───────────────────────────────────
-info "Step 4/6: Enabling auto-start on boot..."
+info "Step 4/7: Enabling auto-start on boot..."
 systemctl enable "${SERVICE_NAME}.service"
 log "Service enabled. Live feed will start automatically on boot."
 
 # ─── Step 5: Disable screen blanking ────────────────────────────────────────
-info "Step 5/6: Disabling screen blanking..."
+info "Step 5/7: Disabling screen blanking..."
 
 # Disable console blanking via kernel parameter
 if [ -f /boot/cmdline.txt ]; then
@@ -134,7 +201,7 @@ if [ -f /boot/firmware/config.txt ]; then
 fi
 
 # ─── Step 6: Start the service now ──────────────────────────────────────────
-info "Step 6/6: Starting live feed..."
+info "Step 6/7: Starting live feed..."
 systemctl start "${SERVICE_NAME}.service" || warn "Could not start now (no display/device?). Will start on next boot."
 
 echo ""
