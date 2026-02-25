@@ -3,7 +3,10 @@
 # livefeed.sh - Zero-Latency Endoscopy Live Feed
 #
 # Ultra-low-latency GStreamer pipeline for HDMI USB capture cards.
-# Renders directly to the display hardware for glass-to-glass minimum latency.
+# Renders directly to the display hardware — no desktop environment needed.
+#
+# Works in CONSOLE MODE (no X11/Wayland required).
+# Uses KMS/DRM for direct display output = absolute minimum latency.
 ###############################################################################
 
 set -euo pipefail
@@ -14,7 +17,7 @@ WIDTH="${WIDTH:-1920}"
 HEIGHT="${HEIGHT:-1080}"
 FRAMERATE="${FRAMERATE:-60}"
 FORMAT="${FORMAT:-image/jpeg}"         # MJPG for low USB bandwidth
-SINK="${SINK:-auto}"                   # auto | kms | gl | fb | x11
+SINK="${SINK:-auto}"                   # auto | kms | fb | drm
 FULLSCREEN="${FULLSCREEN:-true}"
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -35,6 +38,21 @@ wait_for_device() {
     log "Device $VIDEO_DEVICE is ready."
 }
 
+# ─── Wait for DRM/KMS to be ready ───────────────────────────────────────────
+wait_for_drm() {
+    local retries=0
+    while [ ! -e /dev/dri/card0 ] && [ ! -e /dev/dri/card1 ]; do
+        retries=$((retries + 1))
+        if [ $retries -gt 30 ]; then
+            log "WARNING: No DRM device found after 30s, continuing anyway..."
+            return
+        fi
+        log "Waiting for DRM device ... ($retries/30)"
+        sleep 1
+    done
+    log "DRM device ready."
+}
+
 # ─── Configure V4L2 device ──────────────────────────────────────────────────
 configure_device() {
     log "Configuring $VIDEO_DEVICE → ${WIDTH}x${HEIGHT}@${FRAMERATE}fps MJPG"
@@ -50,38 +68,35 @@ configure_device() {
         2>/dev/null || true
 }
 
-# ─── Detect best available video sink ────────────────────────────────────────
-detect_sink() {
-    if [ "$SINK" != "auto" ]; then
-        echo "$SINK"
+# ─── Find the correct DRM connector ─────────────────────────────────────────
+find_drm_connector() {
+    # Try to find HDMI connector ID from DRM
+    local card=""
+    for c in /dev/dri/card*; do
+        if [ -e "$c" ]; then
+            card="$c"
+            break
+        fi
+    done
+
+    if [ -z "$card" ]; then
+        echo ""
         return
     fi
 
-    # Priority order for lowest latency:
-    # 1. kmssink    - Direct KMS/DRM, bypasses compositor entirely (lowest latency)
-    # 2. glimagesink - OpenGL, very fast on Pi with GPU
-    # 3. fbdevsink  - Direct framebuffer
-    # 4. ximagesink - X11 fallback
-    # 5. autovideosink - GStreamer auto-detect
+    # Try common connector IDs for HDMI on Pi
+    # Connector 32 is often HDMI-A-1 on Pi 4/5
+    for conn_id in 32 33 34 35 36 37 38 39 40 41 42 43 44 45; do
+        echo "$conn_id"
+        return
+    done
 
-    if gst-inspect-1.0 kmssink &>/dev/null; then
-        echo "kms"
-    elif gst-inspect-1.0 glimagesink &>/dev/null; then
-        echo "gl"
-    elif gst-inspect-1.0 fbdevsink &>/dev/null; then
-        echo "fb"
-    elif gst-inspect-1.0 ximagesink &>/dev/null; then
-        echo "x11"
-    else
-        echo "autovideosink"
-    fi
+    echo ""
 }
 
 # ─── Build the GStreamer pipeline ────────────────────────────────────────────
 build_pipeline() {
-    local sink_type
-    sink_type=$(detect_sink)
-    log "Using sink: $sink_type"
+    log "Detecting display output method..."
 
     # Source: V4L2 with minimal buffering
     local src="v4l2src device=${VIDEO_DEVICE} io-mode=mmap do-timestamp=true"
@@ -95,49 +110,72 @@ build_pipeline() {
     # Queue: Absolute minimum buffering - drop old frames instantly
     local queue="queue max-size-buffers=1 max-size-time=0 max-size-bytes=0 leaky=downstream"
 
-    # Video convert (needed for some sinks)
+    # Video convert
     local convert="videoconvert"
 
-    # Build sink element based on detection
-    local sink_element
-    case "$sink_type" in
-        kms)
-            # KMS: Direct to display, zero compositor overhead
-            # Try to find the right connector
-            sink_element="kmssink can-scale=false sync=false"
-            ;;
-        gl)
-            sink_element="glimagesink sync=false"
-            ;;
-        fb)
-            sink_element="fbdevsink sync=false"
-            ;;
-        x11)
-            sink_element="ximagesink sync=false"
-            ;;
-        *)
-            sink_element="autovideosink sync=false"
-            ;;
-    esac
+    # Scale to match display (in case resolutions differ)
+    local scale="videoscale"
 
-    # The complete pipeline - every element tuned for minimum latency
-    echo "${src} ! ${caps} ! ${queue} ! ${decoder} ! ${convert} ! ${sink_element}"
+    # ─── Determine the best sink for CONSOLE mode ────────────────────────
+    local sink_element=""
+
+    if [ "$SINK" != "auto" ]; then
+        case "$SINK" in
+            kms|drm)
+                sink_element="kmssink sync=false"
+                ;;
+            fb)
+                sink_element="fbdevsink sync=false"
+                ;;
+            *)
+                sink_element="$SINK sync=false"
+                ;;
+        esac
+        log "Using forced sink: $sink_element"
+    else
+        # Auto-detect: Priority for console (no X11) mode
+        # 1. kmssink  - Direct KMS/DRM output (BEST for console mode)
+        # 2. fbdevsink - Framebuffer (works everywhere)
+
+        if gst-inspect-1.0 kmssink &>/dev/null && [ -e /dev/dri/card0 -o -e /dev/dri/card1 ]; then
+            sink_element="kmssink sync=false"
+            log "Using sink: kmssink (direct KMS/DRM - lowest latency)"
+        elif gst-inspect-1.0 fbdevsink &>/dev/null && [ -e /dev/fb0 ]; then
+            sink_element="fbdevsink sync=false"
+            log "Using sink: fbdevsink (framebuffer)"
+        else
+            # Fallback: try autovideosink
+            sink_element="autovideosink sync=false"
+            log "Using sink: autovideosink (fallback)"
+        fi
+    fi
+
+    # The complete pipeline
+    echo "${src} ! ${caps} ! ${queue} ! ${decoder} ! ${convert} ! ${scale} ! ${sink_element}"
 }
 
 # ─── Disable screen blanking ────────────────────────────────────────────────
 disable_blanking() {
-    # Disable DPMS
+    # Disable console blanking
+    if [ -w /sys/module/kernel/parameters/consoleblank ]; then
+        echo 0 > /sys/module/kernel/parameters/consoleblank 2>/dev/null || true
+    fi
+    setterm -blank 0 -powerdown 0 2>/dev/null || true
+
+    # Disable DPMS if X is somehow running
     if command -v xset &>/dev/null && [ -n "${DISPLAY:-}" ]; then
         xset s off 2>/dev/null || true
         xset -dpms 2>/dev/null || true
         xset s noblank 2>/dev/null || true
     fi
 
-    # Disable console blanking
-    if [ -w /sys/module/kernel/parameters/consoleblank ]; then
-        echo 0 > /sys/module/kernel/parameters/consoleblank 2>/dev/null || true
-    fi
-    setterm -blank 0 -powerdown 0 2>/dev/null || true
+    # Hide the console cursor so it doesn't appear over the video
+    echo 0 > /sys/class/graphics/fbcon/cursor_blink 2>/dev/null || true
+    setterm --cursor off 2>/dev/null || true
+
+    # Clear the console so no text appears behind/around the video
+    clear 2>/dev/null || true
+    echo -ne "\033[9;0]" 2>/dev/null || true  # disable console blanking via VT
 }
 
 # ─── Cleanup on exit ────────────────────────────────────────────────────────
@@ -145,6 +183,8 @@ cleanup() {
     log "Shutting down live feed..."
     kill "$GST_PID" 2>/dev/null || true
     wait "$GST_PID" 2>/dev/null || true
+    # Restore console cursor
+    setterm --cursor on 2>/dev/null || true
     log "Done."
 }
 trap cleanup EXIT INT TERM
@@ -155,19 +195,21 @@ main() {
     log "  Zero-Latency Endoscopy Live Feed"
     log "  Device: $VIDEO_DEVICE"
     log "  Resolution: ${WIDTH}x${HEIGHT}@${FRAMERATE}fps"
+    log "  Mode: CONSOLE (direct hardware display)"
     log "═══════════════════════════════════════════════════"
 
     wait_for_device
+    wait_for_drm
     configure_device
     disable_blanking
 
     local pipeline
     pipeline=$(build_pipeline)
-    log "Pipeline: gst-launch-1.0 $pipeline"
+    log "Pipeline: gst-launch-1.0 -e $pipeline"
 
     # Launch GStreamer with realtime priority if possible
     if command -v chrt &>/dev/null; then
-        log "Launching with realtime priority..."
+        log "Launching with realtime scheduling (FIFO priority 50)..."
         chrt -f 50 gst-launch-1.0 -e $pipeline &
     else
         gst-launch-1.0 -e $pipeline &
@@ -175,7 +217,7 @@ main() {
     GST_PID=$!
 
     log "GStreamer PID: $GST_PID"
-    log "Live feed is running. Press Ctrl+C to stop."
+    log "Live feed is running."
 
     # Wait for GStreamer process
     wait "$GST_PID"

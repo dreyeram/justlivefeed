@@ -35,11 +35,11 @@ echo -e "${CYAN}  Zero-Latency Endoscopy Live Feed - Installer${NC}"
 echo -e "${CYAN}═══════════════════════════════════════════════════${NC}"
 echo ""
 
-# ─── Step 0: Stop ALL previous applications ─────────────────────────────────
-info "Step 0/7: Stopping all previous applications..."
+# ─── Step 0A: Stop ALL previous applications ────────────────────────────────
+info "Step 0/8: Stopping all previous applications..."
 
 # Stop and disable any old endoscopy-suite systemd services
-for svc in endoscopy endoscopy-suite camera-server camera_server endo-camera endo-feed nextjs next; do
+for svc in endoscopy endoscopy-suite camera-server camera_server endo-camera endo-feed nextjs next chromium-kiosk firefox-kiosk kiosk browser; do
     if systemctl is-active --quiet "${svc}.service" 2>/dev/null; then
         warn "Stopping old service: ${svc}"
         systemctl stop "${svc}.service" 2>/dev/null || true
@@ -54,53 +54,110 @@ done
 if command -v pm2 &>/dev/null; then
     warn "Stopping PM2 processes..."
     pm2 kill 2>/dev/null || true
-    # Remove PM2 startup hook so it doesn't restart on boot
     pm2 unstartup systemd 2>/dev/null || true
-    # Also try for the 'lm' user
     su - lm -c "pm2 kill" 2>/dev/null || true
     su - lm -c "pm2 unstartup systemd" 2>/dev/null || true
 fi
 
-# Kill any running Node.js / Next.js processes
-warn "Killing any Node.js / camera server processes..."
+# Kill ALL browser and app processes
+warn "Killing all browser, Node.js, and camera processes..."
+pkill -f "firefox" 2>/dev/null || true
+pkill -f "chromium" 2>/dev/null || true
+pkill -f "chrome" 2>/dev/null || true
+pkill -f "midori" 2>/dev/null || true
+pkill -f "epiphany" 2>/dev/null || true
 pkill -f "node" 2>/dev/null || true
 pkill -f "next" 2>/dev/null || true
 pkill -f "npm" 2>/dev/null || true
-
-# Kill any Python camera servers
 pkill -f "camera_server" 2>/dev/null || true
 pkill -f "camera-server" 2>/dev/null || true
 pkill -f "python.*camera" 2>/dev/null || true
 pkill -f "uvicorn" 2>/dev/null || true
 pkill -f "flask" 2>/dev/null || true
-
-# Kill any old GStreamer pipelines
 pkill -f "gst-launch" 2>/dev/null || true
 
-# Disable old cron jobs or rc.local entries that might start old apps
+# Remove PM2 startup service
+rm -f /etc/systemd/system/pm2-*.service 2>/dev/null || true
+
+# Disable old cron/rc.local entries
 if [ -f /etc/rc.local ]; then
-    if grep -q "endoscopy\|camera\|next\|node\|pm2" /etc/rc.local 2>/dev/null; then
+    if grep -q "endoscopy\|camera\|next\|node\|pm2\|firefox\|chromium\|browser\|kiosk" /etc/rc.local 2>/dev/null; then
         warn "Commenting out old entries in /etc/rc.local..."
-        sed -i '/endoscopy\|camera_server\|camera-server\|next\|pm2/s/^/#DISABLED_BY_LIVEFEED# /' /etc/rc.local
+        sed -i '/endoscopy\|camera_server\|camera-server\|next\|pm2\|firefox\|chromium\|browser\|kiosk/s/^/#DISABLED# /' /etc/rc.local
     fi
 fi
+crontab -u lm -l 2>/dev/null | grep -v "endoscopy\|camera\|next\|node\|pm2\|firefox\|chromium\|kiosk" | crontab -u lm - 2>/dev/null || true
 
-# Remove any old crontab entries for the lm user
-crontab -u lm -l 2>/dev/null | grep -v "endoscopy\|camera\|next\|node\|pm2" | crontab -u lm - 2>/dev/null || true
+log "All previous applications stopped."
 
-# Disable old autostart desktop entries
-for f in /home/lm/.config/autostart/*.desktop /etc/xdg/autostart/*endoscop*.desktop; do
-    if [ -f "$f" ]; then
-        warn "Disabling autostart: $f"
-        mv "$f" "${f}.disabled" 2>/dev/null || true
+# ─── Step 0B: Disable desktop environment & browser kiosk ────────────────────
+info "Step 0B/8: Disabling desktop environment and browser kiosk..."
+
+# Kill the desktop session
+pkill -f "lxsession" 2>/dev/null || true
+pkill -f "lxpanel" 2>/dev/null || true
+pkill -f "pcmanfm" 2>/dev/null || true
+pkill -f "openbox" 2>/dev/null || true
+pkill -f "labwc" 2>/dev/null || true
+pkill -f "wayfire" 2>/dev/null || true
+pkill -f "wlroots" 2>/dev/null || true
+
+# Remove ALL autostart desktop entries (browser kiosk, etc.)
+for dir in \
+    /home/lm/.config/autostart \
+    /home/lm/.config/lxsession/LXDE-pi \
+    /home/lm/.config/lxsession/LXDE \
+    /home/lm/.config/wayfire \
+    /home/lm/.config/labwc \
+    /etc/xdg/autostart \
+    /etc/xdg/lxsession/LXDE-pi \
+    /etc/xdg/lxsession/LXDE; do
+    if [ -d "$dir" ]; then
+        for f in "$dir"/*.desktop "$dir"/autostart; do
+            if [ -f "$f" ]; then
+                warn "Disabling autostart: $f"
+                mv "$f" "${f}.disabled_by_livefeed" 2>/dev/null || true
+            fi
+        done
     fi
 done
 
-# Remove PM2 startup service if it exists
-rm -f /etc/systemd/system/pm2-*.service 2>/dev/null || true
+# Specifically nuke any kiosk scripts
+for f in /home/lm/kiosk.sh /home/lm/start_browser.sh /home/lm/start_kiosk.sh /home/lm/browser.sh; do
+    if [ -f "$f" ]; then
+        warn "Disabling kiosk script: $f"
+        chmod -x "$f" 2>/dev/null || true
+        mv "$f" "${f}.disabled_by_livefeed" 2>/dev/null || true
+    fi
+done
+
+# ─── Switch Pi to CONSOLE boot (no desktop) ──────────────────────────────────
+# This is the most important step — prevents the desktop from starting
+warn "Switching Pi to console boot mode (no desktop)..."
+
+# Method 1: raspi-config nonint (works on Raspberry Pi OS)
+if command -v raspi-config &>/dev/null; then
+    # B1 = console, B2 = console autologin, B3 = desktop, B4 = desktop autologin
+    raspi-config nonint do_boot_behaviour B2 2>/dev/null || true
+    log "Set boot to console autologin via raspi-config."
+fi
+
+# Method 2: systemctl set-default (works on all systemd systems)
+systemctl set-default multi-user.target 2>/dev/null || true
+log "Set systemd default target to multi-user (console)."
+
+# Method 3: Disable display manager directly
+for dm in lightdm gdm3 sddm lxdm nodm; do
+    if systemctl is-enabled --quiet "${dm}.service" 2>/dev/null; then
+        warn "Disabling display manager: ${dm}"
+        systemctl stop "${dm}.service" 2>/dev/null || true
+        systemctl disable "${dm}.service" 2>/dev/null || true
+    fi
+done
+
 systemctl daemon-reload 2>/dev/null || true
 
-log "All previous applications stopped and disabled."
+log "Desktop environment and browser kiosk fully disabled."
 
 # ─── Step 1: Install dependencies ───────────────────────────────────────────
 info "Step 1/7: Installing GStreamer and dependencies..."
