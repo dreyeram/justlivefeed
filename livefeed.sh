@@ -16,7 +16,7 @@ HEIGHT="${HEIGHT:-1080}"
 FRAMERATE="${FRAMERATE:-60}"
 # ─────────────────────────────────────────────────────────────────────────────
 
-log() { echo "[livefeed] $(date '+%H:%M:%S') $*"; }
+log() { echo "[livefeed] $(date '+%H:%M:%S') $*" >&2; }
 
 # ─── Wait for video device ──────────────────────────────────────────────────
 wait_for_device() {
