@@ -117,14 +117,14 @@ find_working_pipeline() {
             local card_num="${card##*/dev/dri/card}"
 
             # Try without connector-id first (auto-detect)
-            local pipeline="${source} ! kmssink driver-name=vc4 sync=false"
+            local pipeline="${source} ! kmssink driver-name=vc4"
             if try_pipeline "kmssink with vc4 driver on card${card_num}" "$pipeline"; then
                 echo "$pipeline"
                 return 0
             fi
 
             # Try generic kmssink
-            pipeline="${source} ! kmssink sync=false"
+            pipeline="${source} ! kmssink"
             if try_pipeline "kmssink generic on card${card_num}" "$pipeline"; then
                 echo "$pipeline"
                 return 0
@@ -134,7 +134,7 @@ find_working_pipeline() {
 
     # ── Attempt 2: fbdevsink (framebuffer) ───────────────────────────────
     if [ -e /dev/fb0 ] && gst-inspect-1.0 fbdevsink &>/dev/null; then
-        local pipeline="${source} ! videoscale ! fbdevsink sync=false"
+        local pipeline="${source} ! videoscale ! fbdevsink"
         if try_pipeline "fbdevsink on /dev/fb0" "$pipeline"; then
             echo "$pipeline"
             return 0
@@ -143,7 +143,7 @@ find_working_pipeline() {
 
     # ── Attempt 3: waylandsink (if wayland is available) ─────────────────
     if gst-inspect-1.0 waylandsink &>/dev/null; then
-        local pipeline="${source} ! waylandsink sync=false"
+        local pipeline="${source} ! waylandsink"
         if try_pipeline "waylandsink" "$pipeline"; then
             echo "$pipeline"
             return 0
@@ -152,7 +152,7 @@ find_working_pipeline() {
 
     # ── Attempt 4: ximagesink (if X is somehow running) ──────────────────
     if [ -n "${DISPLAY:-}" ] && gst-inspect-1.0 ximagesink &>/dev/null; then
-        local pipeline="${source} ! ximagesink sync=false"
+        local pipeline="${source} ! ximagesink"
         if try_pipeline "ximagesink" "$pipeline"; then
             echo "$pipeline"
             return 0
@@ -160,7 +160,7 @@ find_working_pipeline() {
     fi
 
     # ── Attempt 5: autovideosink (let GStreamer decide) ──────────────────
-    local pipeline="${source} ! autovideosink sync=false"
+    local pipeline="${source} ! autovideosink"
     log "Falling back to autovideosink..."
     echo "$pipeline"
     return 0
